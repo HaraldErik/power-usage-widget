@@ -14,6 +14,7 @@ PlasmoidItem {
 
   property string displayText: "… W"
   property bool onBattery: false
+  property bool charging: false
   property var sampleBuffer: []
   property url githubUrl: "https://github.com/trickpattyFH20/power-usage-widget"
 
@@ -46,7 +47,7 @@ PlasmoidItem {
   }
   // Commands to query sysfs directly (native, no extra dependencies)
   property string sampleCommand: "BAT=; for d in /sys/class/power_supply/*; do if [ -f \"$d/type\" ] && grep -qx Battery \"$d/type\"; then BAT=\"$d\"; break; fi; done; if [ -z \"$BAT\" ]; then echo NA; exit 1; fi; if [ -r \"$BAT/power_now\" ]; then cat \"$BAT/power_now\"; elif [ -r \"$BAT/current_now\" ] && [ -r \"$BAT/voltage_now\" ]; then echo \"$(cat \"$BAT/current_now\") $(cat \"$BAT/voltage_now\")\"; else echo NA; fi"
-  property string statusCommand: "BAT=; for d in /sys/class/power_supply/*; do if [ -f \"$d/type\" ] && grep -qx Battery \"$d/type\"; then BAT=\"$d\"; break; fi; done; AC_ONLINE=; for a in /sys/class/power_supply/*; do if [ -f \"$a/type\" ] && grep -qx Mains \"$a/type\"; then if [ -r \"$a/online\" ] && [ \"$(cat \"$a/online\")\" = \"1\" ]; then AC_ONLINE=1; fi; fi; done; if [ -n \"$BAT\" ] && [ -r \"$BAT/status\" ] && grep -qx Discharging \"$BAT/status\"; then echo Discharging; elif [ \"$AC_ONLINE\" = \"1\" ]; then echo AC; else echo Battery; fi"
+  property string statusCommand: "BAT=; for d in /sys/class/power_supply/*; do if [ -f \"$d/type\" ] && grep -qx Battery \"$d/type\"; then BAT=\"$d\"; break; fi; done; AC_ONLINE=; for a in /sys/class/power_supply/*; do if [ -f \"$a/type\" ] && grep -qx Mains \"$a/type\"; then if [ -r \"$a/online\" ] && [ \"$(cat \"$a/online\")\" = \"1\" ]; then AC_ONLINE=1; fi; fi; done; if [ -n \"$BAT\" ] && [ -r \"$BAT/status\" ] && grep -qx Discharging \"$BAT/status\"; then echo Discharging; elif [ \"$AC_ONLINE\" = \"1\" ] || { [ -n \"$BAT\" ] && [ -r \"$BAT/status\" ] && grep -qx Charging \"$BAT/status\"; }; then echo Charging; else echo Battery; fi"
 
   // Shown in panels (compact) and in popup/preview (full)
   compactRepresentation: PlasmaComponents.ToolButton {
@@ -62,7 +63,7 @@ PlasmoidItem {
     TextMetrics {
       id: widthMetrics
       font.pointSize: root.fontPointSize
-      text: "000.0 W"
+      text: "+000.0 W"
     }
 
     Layout.preferredWidth: widthMetrics.width + leftPadding + rightPadding
@@ -235,7 +236,7 @@ PlasmoidItem {
             var sum = 0
             for (var i = 0; i < root.sampleBuffer.length; ++i) sum += root.sampleBuffer[i]
             var avg = sum / root.sampleBuffer.length
-            root.displayText = avg.toFixed(1) + " W"
+            root.displayText = (root.charging ? "+" : "") + avg.toFixed(1) + " W"
             root.sampleBuffer = []
           }
         }
@@ -243,7 +244,7 @@ PlasmoidItem {
     }
   }
 
-  // Checks whether the battery is discharging (on battery power)
+  // Checks whether the battery is discharging (on battery) or a charger is connected
   PlasmaSupport.DataSource {
     id: execStatus
     engine: "executable"
@@ -257,16 +258,18 @@ PlasmoidItem {
         delete buffers[source]
         disconnectSource(source)
         var discharging = /^Discharging$/i.test(output)
-        root.onBattery = discharging
-        Plasmoid.status = discharging ? PlasmaCore.Types.ActiveStatus : PlasmaCore.Types.PassiveStatus
-        if (!discharging) {
+        var charging = /^Charging$/i.test(output)
+        if (discharging !== root.onBattery || charging !== root.charging) {
+          // Mode changed; don't mix charge and discharge samples
           root.sampleBuffer = []
-          if (root.hideOnAC) {
-            root.displayText = ""
-          } else {
-            root.displayText = "— W"
-          }
+          root.displayText = (discharging || charging) ? "… W" : "— W"
         }
+        root.onBattery = discharging
+        root.charging = charging
+        var shown = discharging || (charging && !root.hideOnAC)
+        Plasmoid.status = shown ? PlasmaCore.Types.ActiveStatus : PlasmaCore.Types.PassiveStatus
+        if (!discharging && !charging) root.displayText = "— W"
+        if (!discharging && root.hideOnAC) root.displayText = ""
       }
     }
   }
@@ -280,7 +283,7 @@ PlasmoidItem {
     onTriggered: checkStatus()
   }
 
-  // Take a sample every second; only processed when on battery
+  // Take a sample every second; only processed when on battery or charging
   Timer {
     id: sampleTimer
     interval: root.sampleIntervalSeconds * 1000
@@ -310,8 +313,8 @@ PlasmoidItem {
   }
 
   function sampleOnce() {
-    if (!root.onBattery) {
-      // Not on battery; ensure buffer cleared
+    if (!root.onBattery && !root.charging) {
+      // No battery activity; ensure buffer cleared
       root.sampleBuffer = []
       return
     }
